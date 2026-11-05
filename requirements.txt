@@ -1,0 +1,33 @@
+name: update-stock-prices
+
+on:
+  schedule:
+    # UTC 07:10 = 日本時間 16:10(平日のみ。祝日・年末年始はスクリプト側で判定して終了)
+    - cron: "10 7 * * 1-5"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "休場日チェックを無視して実行する(テスト用)"
+        type: boolean
+        default: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - run: python update_prices.py
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          FORCE: ${{ inputs.force }}
