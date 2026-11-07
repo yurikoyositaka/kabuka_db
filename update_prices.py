@@ -1,4 +1,4 @@
-"""プライム市場の株価を、相場が開いている日の大引け後にTursoへ更新する(GitHub Actions用)。"""
+"""プライム市場の株価＋日経平均を、相場が開いている日の大引け後にTursoへ更新する(GitHub Actions用)。"""
 import datetime as dt
 import io
 import os
@@ -18,7 +18,7 @@ AUTO_ADJUST = True          # True: 分割調整後の株価で保存
 LOOKBACK = "5d"             # 取りこぼし対策で、毎回直近5営業日分を上書き
 CHUNK = 200                 # yfinanceに一度に投げる銘柄数
 REFERENCE = "7203.T"        # 当日データが出たかの確認に使う銘柄
-JPX_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xls"
+JPX_URL = "https://www.jpx.co.jp/markets/statistics-equities/misc/tvdivq0000001vg2-att/data_j.xlsx"
 # =========================================
 
 JST = ZoneInfo("Asia/Tokyo")
@@ -88,90 +88,35 @@ def save(rows) -> None:
 
 # ---------- 銘柄一覧 ----------
 def get_tickers():
-    """JPXの銘柄一覧からプライム銘柄を取得。失敗したらDBに入っている銘柄を使う。"""
+    """JPXの銘柄一覧からプライム銘柄を取得し、日経平均(^N225)を追加。失敗時はDBから。"""
     try:
         r = requests.get(JPX_URL, timeout=60)
         r.raise_for_status()
-        df = pd.read_excel(io.BytesIO(r.content), dtype=str)
+        # .xlsx に対応するため engine='openpyxl' を指定
+        df = pd.read_excel(io.BytesIO(r.content), dtype=str, engine='openpyxl')
         df = df[df["市場・商品区分"].str.startswith("プライム", na=False)]
-        codes = df["コード"].str.strip().tolist()
-        if len(codes) > 1000:
-            return codes
-        raise RuntimeError(f"銘柄数が少なすぎます: {len(codes)}")
+        
+        # yfinance用に末尾に.Tを付与したリストを作成
+        codes = df["コード"].str.strip().str.split('.').str[0].str.zfill(4).tolist()
+        yf_tickers = [c + ".T" for c in codes]
+        
+        # ★ ここで日経平均を追加 ★
+        yf_tickers.append("^N225")
+        
+        if len(yf_tickers) > 1000:
+            return yf_tickers
+        raise RuntimeError(f"銘柄数が少なすぎます: {len(yf_tickers)}")
+        
     except Exception as e:
         print("JPX一覧の取得に失敗。DBの銘柄を使います:", e)
         res = turso([(f"SELECT DISTINCT ticker FROM {TABLE}", [])])
         rows = res[0]["response"]["result"]["rows"]
-        return [r[0]["value"].removesuffix(".T") for r in rows]
-
-
-# ---------- 株価取得 ----------
-def _num(x):
-    return None if pd.isna(x) else float(x)
-
-
-def wait_until_ready(today: str) -> bool:
-    """当日分の株価がYahooに反映されるまで最大約30分待つ。"""
-    for attempt in range(4):
-        df = yf.download(REFERENCE, period="5d", interval="1d", progress=False, auto_adjust=True)
-        if today in {d.strftime("%Y-%m-%d") for d in df.index}:
-            return True
-        if attempt < 3:
-            print("当日データ未反映。10分待ちます...")
-            time.sleep(600)
-    return False
-
-
-def fetch(tickers):
-    rows = []
-    for i in range(0, len(tickers), CHUNK):
-        chunk = [t + ".T" for t in tickers[i:i + CHUNK]]
-        df = yf.download(
-            chunk, period=LOOKBACK, interval="1d", group_by="ticker",
-            auto_adjust=AUTO_ADJUST, threads=True, progress=False,
-        )
-        for t in chunk:
-            try:
-                d = df[t].dropna(subset=["Close"])
-            except KeyError:
-                continue
-            code = t if STORE_WITH_SUFFIX else t.removesuffix(".T")
-            for idx, r in d.iterrows():
-                vol = 0 if pd.isna(r["Volume"]) else int(r["Volume"])
-                rows.append((
-                    code, idx.strftime("%Y-%m-%d"),
-                    _num(r["Open"]), _num(r["High"]), _num(r["Low"]), _num(r["Close"]), vol,
-                ))
-        time.sleep(1)
-    return rows
-
-
-# ---------- メイン ----------
-def main():
-    today = dt.datetime.now(JST).date()
-    force = os.environ.get("FORCE") == "true"
-
-    if not force and not is_market_day(today):
-        print(f"{today} は休場日なので終了します")
-        return
-    if not force and not wait_until_ready(today.isoformat()):
-        raise RuntimeError("当日データを取得できませんでした(臨時休場、またはデータ未反映)")
-
-    tickers = get_tickers()
-    rows = fetch(tickers)
-    if not rows:
-        raise RuntimeError("取得できたデータが0件でした")
-    save(rows)
-
-    msg = f"株価更新完了 {today}: 対象{len(tickers)}銘柄 / {len(rows)}行を保存"
-    print(msg)
-    notify("✅ " + msg)
-
-
-if __name__ == "__main__":
-    try:
-        main()
-    except Exception as e:
-        notify(f"❌ 株価更新に失敗: {e}")
-        print("ERROR:", e, file=sys.stderr)
-        sys.exit(1)
+        
+        yf_tickers = []
+        for r in rows:
+            ticker = r[0]["value"]
+            # インデックス（^N225等）はそのまま、個別株は必要に応じて.Tを補完
+            if ticker.startswith("^"):
+                yf_tickers.append(ticker)
+            else:
+                yf_tickers.append
