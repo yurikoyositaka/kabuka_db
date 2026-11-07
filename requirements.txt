@@ -2,4 +2,4 @@ yfinance
 pandas
 requests
 jpholiday
-xlrd
+openpyxl
